@@ -77,10 +77,14 @@ fn process_req(stream: &mut TcpStream) -> Option<HTTP<'_, impl Into<Vec<u8>>>> {
                     let len = v.as_bytes().len();
                     let body = v;
 
+                    println!("{v}");
+
                     let res = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
                             len, body
                         );
+
+                    println!("{len}");
 
                     Some(HTTP {
                         response: Response {
@@ -135,7 +139,7 @@ impl Request {
             .iter()
             .fold(HashMap::<String, String, _>::new(), |mut acc, header| {
                 if let Some((name, value)) = header.split_once(":") {
-                    acc.insert(name.to_owned(), value.to_owned());
+                    acc.insert(name.trim().to_owned(), value.trim().to_owned());
                 }
 
                 acc
