@@ -1,8 +1,8 @@
 use itertools::Itertools;
-use nom::AsBytes;
 use std::{
+    collections::HashMap,
     io::{Read, Write},
-    net::{TcpListener, TcpStream},
+    net::{Shutdown, TcpListener, TcpStream},
     string::FromUtf8Error,
 };
 
@@ -18,10 +18,10 @@ fn main() {
         match stream {
             Ok(mut stream) => {
                 match process_req(&mut stream) {
-                    Some(r) => r.stream.write_all(&r.response.bytes).ok(),
+                    Some(r) => r.stream.write_all(&r.response.as_bytes()).ok(),
                     None => Some(()),
                 };
-                // process_req(&mut stream).and_then(|r| stream.write_all(NOT_FOUND.as_bytes()).ok());
+                stream.shutdown(Shutdown::Both).ok();
             }
             Err(e) => {
                 println!("error: {}", e);
@@ -30,13 +30,16 @@ fn main() {
     }
 }
 
-pub struct HTTP<'a> {
+pub struct HTTP<'a, T>
+where
+    T: Into<Vec<u8>>,
+{
     // request: Request,
-    response: Response,
+    response: Response<T>,
     stream: &'a mut TcpStream,
 }
 
-fn process_req(stream: &mut TcpStream) -> Option<HTTP<'_>> {
+fn process_req(stream: &mut TcpStream) -> Option<HTTP<'_, impl Into<Vec<u8>>>> {
     let bytes = read_bytes(stream);
     let string = bytes_to_str(bytes).ok();
     let request = parse_req(string);
@@ -46,8 +49,8 @@ fn process_req(stream: &mut TcpStream) -> Option<HTTP<'_>> {
             ("/", Method::Get) => Some(HTTP {
                 // request,
                 response: Response {
-                    content_lengh: 0,
-                    bytes: OK.as_bytes().to_vec(),
+                    content_length: 0,
+                    value: OK.to_owned(),
                 },
                 stream,
             }),
@@ -55,25 +58,44 @@ fn process_req(stream: &mut TcpStream) -> Option<HTTP<'_>> {
                 let body = request.path.params.join("");
                 let len = body.len();
 
-                // TODO: Build response builder
+                // TODO: Build response builder that uses content_length
                 let res = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
                     len, body
                 );
                 Some(HTTP {
-                    // request,
                     response: Response {
-                        content_lengh: len,
-                        bytes: res.as_bytes().to_vec(),
+                        content_length: len,
+                        value: res,
                     },
                     stream,
                 })
             }
+            ("user-agent", Method::Get) => match request.headers().get("User-Agent") {
+                None => None,
+                Some(v) => {
+                    let len = v.as_bytes().len();
+                    let body = v;
+
+                    let res = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                            len, body
+                        );
+
+                    Some(HTTP {
+                        response: Response {
+                            content_length: len,
+                            value: res,
+                        },
+                        stream,
+                    })
+                }
+            },
             _ => Some(HTTP {
                 // request,
                 response: Response {
-                    content_lengh: 0,
-                    bytes: NOT_FOUND.as_bytes().to_vec(),
+                    content_length: 0,
+                    value: NOT_FOUND.to_owned(),
                 },
                 stream,
             }),
@@ -83,20 +105,43 @@ fn process_req(stream: &mut TcpStream) -> Option<HTTP<'_>> {
     }
 }
 
-pub struct Response {
-    content_lengh: usize,
-    bytes: Vec<u8>,
+pub struct Response<T>
+where
+    T: Into<Vec<u8>>,
+{
+    content_length: usize,
+    value: T, // bytes: Vec<u8>,
+}
+
+impl<T> Response<T>
+where
+    T: Into<Vec<u8>>,
+{
+    pub fn as_bytes(self) -> Vec<u8> {
+        self.value.into()
+    }
 }
 
 #[derive(Debug)]
 struct Request {
     method: Method,
     path: Path,
-    #[allow(dead_code)]
     header: Vec<String>,
-    body: Vec<u8>,
 }
 
+impl Request {
+    fn headers(&self) -> HashMap<String, String> {
+        self.header
+            .iter()
+            .fold(HashMap::<String, String, _>::new(), |mut acc, header| {
+                if let Some((name, value)) = header.split_once(":") {
+                    acc.insert(name.to_owned(), value.to_owned());
+                }
+
+                acc
+            })
+    }
+}
 // TODO: Split headers and take body into account
 fn parse_req(str: Option<String>) -> Option<Request> {
     match str {
@@ -107,14 +152,13 @@ fn parse_req(str: Option<String>) -> Option<Request> {
                     let rest = elements.split(|s| s == &"\r\n\r\n").collect_vec();
                     let rest = rest.split_first();
 
-                    rest.map(|(headers, body)| {
+                    rest.map(|(headers, _body)| {
                         let header = headers.iter().copied().map(|s| s.to_owned()).collect();
 
                         Request {
                             method: rp.method,
                             path: rp.path,
                             header,
-                            body: flatten_to_bytes(body),
                         }
                     })
                 })
@@ -204,12 +248,4 @@ impl RequestPart {
 pub struct Path {
     path: String,
     params: Vec<String>,
-}
-
-// TODO: Pretty sure this is wrong
-fn flatten_to_bytes(body: &[&[&str]]) -> Vec<u8> {
-    body.iter()
-        .flat_map(|inner| inner.iter().flat_map(|&s| s.as_bytes()))
-        .copied()
-        .collect()
 }
